@@ -27,12 +27,44 @@ import os
 import sys
 import urllib2
 from BaseHTTPServer import BaseHTTPRequestHandler, HTTPServer
+from HTMLParser import HTMLParser
+import re
 
 BIND_ADDR = os.environ.get("BIND_ADDR", "0.0.0.0")
 SERVER_PORT = int(os.environ.get("SERVER_PORT", "80"))
 URL_PREFIX = os.environ.get("URL_PREFIX", "").rstrip('/') + '/'
 SPARK_MASTER_HOST = ""
+SPARK_TITLE_PATTERN = "Spark (?P<spark_type>\w+) at (?P<spark_url>\S+)"
+URL_PATTERN = "(?P<protocol>\w+://)?(?P<host>[-\w.]+):(?P<port>\d+)"
+WORKER_HREF_PATTERN = r'(href="/proxy:)(spark-[-\w]+-worker-[-\w]+)(:)'
 
+class SparkHTMLParser(HTMLParser):
+    def __init__(self):
+        self.title = False
+        self.spark_title = None
+        self.spark_type = None
+        self.spark_url = None
+        HTMLParser.__init__(self)
+
+    def handle_starttag(self, tag, attrs):
+        if tag == 'title':
+            self.title = True
+
+    def handle_endtag(self, tag):
+        if tag == 'title':
+            self.title = False
+
+    def handle_data(self, data):
+        if self.title:
+            if self.spark_type is not None or self.spark_url is not None:
+                raise Exception("Spark data is already filled (orig title: {0}, current title: {1})".format(self.spark_title, data))
+            self.spark_title = data
+            try:
+                spark_dict = re.search(SPARK_TITLE_PATTERN, data).groupdict()
+                self.spark_type = spark_dict["spark_type"].lower()
+                self.spark_url = spark_dict["spark_url"]
+            except:
+                pass
 
 class ProxyHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -74,6 +106,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
         if resCode == 200:
             page = proxiedRequest.read()
             page = self.rewriteLinks(page, targetHost)
+            page = self.rewriteWorkerLinks(page)
+            page = self.removeDeadLinks(page)
             resContentType = proxiedRequest.info()["Content-Type"]
             self.send_response(200)
             self.send_header("Content-Type", resContentType)
@@ -110,6 +144,17 @@ class ProxyHandler(BaseHTTPRequestHandler):
         page = page.replace('{{uiroot}}/history', '{{uiroot}}' + target + 'history')
         return page
 
+    def rewriteWorkerLinks(self, page):
+        parser = SparkHTMLParser()
+        parser.feed(page)
+        if parser.spark_type == 'worker':
+            worker_dict = re.search(URL_PATTERN, parser.spark_url).groupdict()
+            page = re.sub(WORKER_HREF_PATTERN, r"\g<1>" + worker_dict['host'] + r"\g<3>", page)
+        return page
+
+    def removeDeadLinks(self, page):
+        page = re.sub('<p><a href="/proxy:[-\w]+:\d+">Back to Master</a></p>', '', page)
+        return page
 
 if __name__ == '__main__':
     if len(sys.argv) < 2:
