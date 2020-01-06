@@ -89,6 +89,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
         postData = self.rfile.read(length)
         self.proxyRequest(postData)
 
+    def log_request(self, code='-', size='-'):
+        if "GET /healthz" in self.requestline and 200 == code:
+            return
+        super(ProxyHandler, self).log_request(code, size)
+
     def proxyRequest(self, data):
         targetHost, path = self.extractUrlDetails(self.path)
         targetUrl = "http://" + targetHost + path
