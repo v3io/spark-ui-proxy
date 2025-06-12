@@ -21,22 +21,23 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-import SocketServer
+import socketserver
 import logging
 import os
 import sys
-import urllib2
-from BaseHTTPServer import BaseHTTPRequestHandler, HTTPServer
-from HTMLParser import HTMLParser
+import urllib.request
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from html.parser import HTMLParser
 import re
 
 BIND_ADDR = os.environ.get("BIND_ADDR", "0.0.0.0")
 SERVER_PORT = int(os.environ.get("SERVER_PORT", "80"))
 URL_PREFIX = os.environ.get("URL_PREFIX", "").rstrip('/') + '/'
 SPARK_MASTER_HOST = ""
-SPARK_TITLE_PATTERN = "Spark (?P<spark_type>\w+) at (?P<spark_url>\S+)"
-URL_PATTERN = "(?P<protocol>\w+://)?(?P<host>[-\w.]+):(?P<port>\d+)"
+SPARK_TITLE_PATTERN = r"Spark (?P<spark_type>\w+) at (?P<spark_url>\S+)"
+URL_PATTERN = r"(?P<protocol>\w+://)?(?P<host>[-\w.]+):(?P<port>\d+)"
 WORKER_HREF_PATTERN = r'(href="/proxy:)(spark-[-\w]+-worker-[-\w]+)(:)'
+
 
 class SparkHTMLParser(HTMLParser):
     def __init__(self):
@@ -57,7 +58,8 @@ class SparkHTMLParser(HTMLParser):
     def handle_data(self, data):
         if self.title:
             if self.spark_type is not None or self.spark_url is not None:
-                raise Exception("Spark data is already filled (orig title: {0}, current title: {1})".format(self.spark_title, data))
+                raise Exception(
+                    "Spark data is already filled (orig title: {0}, current title: {1})".format(self.spark_title, data))
             self.spark_title = data
             try:
                 spark_dict = re.search(SPARK_TITLE_PATTERN, data).groupdict()
@@ -66,6 +68,7 @@ class SparkHTMLParser(HTMLParser):
             except:
                 pass
 
+
 class ProxyHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         # Add an health checking endpoint.
@@ -73,7 +76,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self.send_response(code=200)
             self.send_header("Content-type", "text/plain")
             self.end_headers()
-            self.wfile.write("OK")
+            self.wfile.write(b"OK")
             return
 
         # redirect if we are hitting the home page
@@ -85,14 +88,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self.proxyRequest(None)
 
     def do_POST(self):
-        length = int(self.headers.getheader('content-length'))
+        length = int(self.headers.get('content-length'))
         postData = self.rfile.read(length)
         self.proxyRequest(postData)
-
-    def log_request(self, code='-', size='-'):
-        if "GET /healthz" in self.requestline and 200 == code:
-            return
-        super(ProxyHandler, self).log_request(code, size)
 
     def proxyRequest(self, data):
         targetHost, path = self.extractUrlDetails(self.path)
@@ -101,7 +99,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         print("get: %s  host: %s  path: %s  target: %s" % (self.path, targetHost, path, targetUrl))
 
         try:
-            proxiedRequest = urllib2.urlopen(targetUrl, data)
+            proxiedRequest = urllib.request.urlopen(targetUrl, data)
         except Exception as ue:
             logging.error("Caught an exception trying to reach [ {0} ]".format(targetUrl))
             raise ue
@@ -110,9 +108,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         if resCode == 200:
             page = proxiedRequest.read()
-            page = self.rewriteLinks(page, targetHost)
-            page = self.rewriteWorkerLinks(page)
-            page = self.removeDeadLinks(page)
+            if not path.endswith(".png"):
+                page = self.rewriteLinks(page, targetHost)
+                page = self.rewriteWorkerLinks(page)
+                page = self.removeDeadLinks(page)
             resContentType = proxiedRequest.info()["Content-Type"]
             self.send_response(200)
             self.send_header("Content-Type", resContentType)
@@ -123,7 +122,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self.send_header("Location", URL_PREFIX + "proxy:" + SPARK_MASTER_HOST)
             self.end_headers()
         else:
-            raise Exception("Unsupported response: " + resCode)
+            raise Exception(f"Unsupported response: {resCode}")
 
     def extractUrlDetails(self, path):
         if path.startswith(URL_PREFIX + "proxy:"):
@@ -134,9 +133,13 @@ class ProxyHandler(BaseHTTPRequestHandler):
         else:
             targetHost = SPARK_MASTER_HOST
             path = path
-        return (targetHost, path)
+        return targetHost, path
 
     def rewriteLinks(self, page, targetHost):
+        # Convert bytes to string for processing
+        if isinstance(page, bytes):
+            page = page.decode('utf-8')
+
         target = "{0}proxy:{1}/".format(URL_PREFIX, targetHost)
         page = page.replace('href="/', 'href="' + target)
         page = page.replace("'<div><a href=' + logUrl + '>'",
@@ -147,19 +150,34 @@ class ProxyHandler(BaseHTTPRequestHandler):
         page = page.replace('action="', 'action="' + target)
         page = page.replace('"/api/v1/', '"' + target + 'api/v1/')
         page = page.replace('{{uiroot}}/history', '{{uiroot}}' + target + 'history')
-        return page
+
+        # Convert back to bytes for writing
+        return page.encode('utf-8')
 
     def rewriteWorkerLinks(self, page):
+        # Convert bytes to string for processing
+        if isinstance(page, bytes):
+            page = page.decode('utf-8')
+
         parser = SparkHTMLParser()
         parser.feed(page)
         if parser.spark_type == 'worker':
             worker_dict = re.search(URL_PATTERN, parser.spark_url).groupdict()
             page = re.sub(WORKER_HREF_PATTERN, r"\g<1>" + worker_dict['host'] + r"\g<3>", page)
-        return page
+
+        # Convert back to bytes if it was originally bytes
+        return page.encode('utf-8') if isinstance(page, str) else page
 
     def removeDeadLinks(self, page):
-        page = re.sub('<p><a href="/proxy:[-\w]+:\d+">Back to Master</a></p>', '', page)
-        return page
+        # Convert bytes to string for processing
+        if isinstance(page, bytes):
+            page = page.decode('utf-8')
+
+        page = re.sub(r'<p><a href="/proxy:[-\w]+:\d+">Back to Master</a></p>', '', page)
+
+        # Convert back to bytes
+        return page.encode('utf-8')
+
 
 if __name__ == '__main__':
     if len(sys.argv) < 2:
@@ -173,10 +191,12 @@ if __name__ == '__main__':
 
     print("Starting server on http://{0}:{1}".format(BIND_ADDR, SERVER_PORT))
 
-    class ForkingHTTPServer(SocketServer.ForkingMixIn, HTTPServer):
+
+    class ForkingHTTPServer(socketserver.ForkingMixIn, HTTPServer):
         def finish_request(self, request, client_address):
             request.settimeout(30)
             HTTPServer.finish_request(self, request, client_address)
+
 
     server_address = (BIND_ADDR, SERVER_PORT)
     httpd = ForkingHTTPServer(server_address, ProxyHandler)
